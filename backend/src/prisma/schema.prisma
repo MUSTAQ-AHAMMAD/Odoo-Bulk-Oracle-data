@@ -1,0 +1,62 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  role         String    @default("user")
+  createdAt    DateTime  @default(now())
+  templates    Template[]
+  jobs         Job[]
+  mappings     MappingConfig[]
+}
+
+model Template {
+  id           String    @id @default(cuid())
+  userId       String
+  name         String
+  content      String
+  outputType   String    @default("html")
+  placeholders String[]
+  createdAt    DateTime  @default(now())
+  deletedAt    DateTime?
+  user         User      @relation(fields: [userId], references: [id])
+  jobs         Job[]
+  mappings     MappingConfig[]
+}
+
+model MappingConfig {
+  id             String   @id @default(cuid())
+  userId         String
+  templateId     String
+  columnMappings Json
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id])
+  template       Template @relation(fields: [templateId], references: [id])
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  userId      String
+  templateId  String?
+  fileName    String
+  filePath    String
+  status      String    @default("pending")
+  progress    Int       @default(0)
+  totalRows   Int       @default(0)
+  successRows Int       @default(0)
+  failedRows  Int       @default(0)
+  outputUrl   String?
+  errorRows   Json?
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id])
+  template    Template? @relation(fields: [templateId], references: [id])
+  mapping     Json?
+}

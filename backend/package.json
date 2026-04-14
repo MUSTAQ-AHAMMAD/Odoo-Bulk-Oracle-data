@@ -1,0 +1,55 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "CRM bulk mapping backend",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "prisma": {
+    "schema": "src/prisma/schema.prisma"
+  },
+  "scripts": {
+    "dev": "nodemon --exec tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "archiver": "^6.0.2",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.73.5",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "express-rate-limit": "^7.5.1",
+    "handlebars": "^4.7.9",
+    "ioredis": "^5.10.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "node-cron": "^3.0.3",
+    "papaparse": "^5.5.3",
+    "puppeteer": "^22.15.0",
+    "ws": "^8.20.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.4",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.25",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^1.4.13",
+    "@types/node": "^20.19.39",
+    "@types/node-cron": "^3.0.11",
+    "@types/papaparse": "^5.5.2",
+    "@types/ws": "^8.18.1",
+    "nodemon": "^3.1.14",
+    "prisma": "^5.22.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
