@@ -3,7 +3,7 @@ import puppeteer, { type Browser } from 'puppeteer';
 let browserPromise: Promise<Browser> | null = null;
 
 const getBrowser = async (): Promise<Browser> => {
-  if (!browserPromise) browserPromise = puppeteer.launch({ headless: 'new' });
+  if (!browserPromise) browserPromise = puppeteer.launch({ headless: true });
   return browserPromise;
 };
 
