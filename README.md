@@ -5,7 +5,7 @@ A production-oriented full-stack CRM app for uploading CSV/Excel files, mapping 
 ## Tech Stack
 - Backend: Node.js, Express, TypeScript, Prisma, PostgreSQL, BullMQ, Redis, ws
 - Frontend: React, Vite, Tailwind CSS, React Router v6
-- Parsing/Generation: multer, papaparse, xlsx, puppeteer, archiver
+- Parsing/Generation: multer, papaparse, exceljs, puppeteer, archiver
 
 ## Prerequisites
 - Node.js 20+

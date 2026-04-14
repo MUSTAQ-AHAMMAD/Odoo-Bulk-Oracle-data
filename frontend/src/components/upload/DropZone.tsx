@@ -10,7 +10,7 @@ export const DropZone = ({ onFile }: DropZoneProps): JSX.Element => {
     maxSize: 100 * 1024 * 1024,
     accept: {
       'text/csv': ['.csv'],
-      'application/vnd.ms-excel': ['.xls'],
+      
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
     },
     onDropAccepted: (files) => {
