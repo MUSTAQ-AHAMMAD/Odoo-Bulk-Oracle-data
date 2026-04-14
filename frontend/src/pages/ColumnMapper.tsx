@@ -48,7 +48,7 @@ export default function ColumnMapper(): JSX.Element {
           ))}
         </div>
       )}
-      <button className="rounded bg-blue-600 px-4 py-2 text-white" onClick={saveAndGenerate} disabled={!templateId}>Save Mapping &amp; Generate</button>
+      <button className="rounded bg-blue-600 px-4 py-2 text-white" onClick={saveAndGenerate} disabled={!templateId}>Save Mapping & Generate</button>
     </div>
   );
 }

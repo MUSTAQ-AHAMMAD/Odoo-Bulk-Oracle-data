@@ -1,9 +1,22 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import path from 'node:path';
 import Papa from 'papaparse';
 import xlsx from 'xlsx';
 
 export type ParsedRow = Record<string, string | number | boolean | null>;
+
+
+const uploadRoot = path.resolve(process.cwd(), 'uploads');
+
+const resolveUploadPath = (filePath: string): string => {
+  const safeName = path.basename(filePath);
+  const normalized = path.resolve(uploadRoot, safeName);
+  if (!normalized.startsWith(`${uploadRoot}${path.sep}`)) {
+    throw new Error('Invalid file path');
+  }
+  return normalized;
+};
 
 const normalize = (row: Record<string, unknown>): ParsedRow => {
   const out: ParsedRow = {};
@@ -38,7 +51,7 @@ export const parseCSV = async (
       resolve();
     });
     parser.on('error', reject);
-    fs.createReadStream(filePath).pipe(parser);
+    fs.createReadStream(resolveUploadPath(filePath)).pipe(parser);
   });
 
 export const parseExcel = async (
@@ -46,7 +59,7 @@ export const parseExcel = async (
   chunkSize: number,
   callback: (rows: ParsedRow[]) => Promise<void>
 ): Promise<void> => {
-  const wb = xlsx.readFile(filePath, { cellDates: false });
+  const wb = xlsx.readFile(resolveUploadPath(filePath), { cellDates: false });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = xlsx.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null }).map(normalize);
   for (let i = 0; i < rows.length; i += chunkSize) {
@@ -70,12 +83,12 @@ export const getPreviewRows = async (
   maxRows = 100
 ): Promise<{ headers: string[]; rows: ParsedRow[] }> => {
   if (isCsv(filePath)) {
-    const raw = await fsp.readFile(filePath, 'utf-8');
+    const raw = await fsp.readFile(resolveUploadPath(filePath), 'utf-8');
     const parsed = Papa.parse<Record<string, unknown>>(raw, { header: true, skipEmptyLines: true });
     const rows = parsed.data.slice(0, maxRows).map(normalize);
     return { headers: parsed.meta.fields ?? Object.keys(rows[0] ?? {}), rows };
   }
-  const wb = xlsx.readFile(filePath, { cellDates: false });
+  const wb = xlsx.readFile(resolveUploadPath(filePath), { cellDates: false });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = xlsx.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null }).slice(0, maxRows).map(normalize);
   return { headers: Object.keys(rows[0] ?? {}), rows };
@@ -83,10 +96,10 @@ export const getPreviewRows = async (
 
 export const getTotalRows = async (filePath: string): Promise<number> => {
   if (isCsv(filePath)) {
-    const raw = await fsp.readFile(filePath, 'utf-8');
+    const raw = await fsp.readFile(resolveUploadPath(filePath), 'utf-8');
     return Papa.parse<Record<string, unknown>>(raw, { header: true, skipEmptyLines: true }).data.length;
   }
-  const wb = xlsx.readFile(filePath, { cellDates: false });
+  const wb = xlsx.readFile(resolveUploadPath(filePath), { cellDates: false });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   return xlsx.utils.sheet_to_json(sheet, { defval: null }).length;
 };

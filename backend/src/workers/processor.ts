@@ -90,7 +90,7 @@ const processJob = async (jobId: string): Promise<void> => {
       successRows,
       failedRows,
       outputUrl: zipPath,
-      errorRows: errorRows.length ? errorRows : null
+      errorRows: errorRows.length > 0 ? errorRows : null
     }
   });
   emitProgress(jobId, 100, 'completed');

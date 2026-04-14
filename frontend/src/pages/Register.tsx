@@ -30,7 +30,7 @@ export default function Register(): JSX.Element {
         {errors.password && <p className="text-sm text-red-600">{errors.password.message}</p>}
         <button className="w-full rounded bg-blue-600 p-2 text-white" type="submit">Register</button>
       </form>
-      <Link className="text-sm text-blue-600" to="/login">Already have account?</Link>
+      <Link className="text-sm text-blue-600" to="/login">Already have an account?</Link>
     </div>
   );
 }

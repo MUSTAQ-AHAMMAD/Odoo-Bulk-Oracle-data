@@ -5,6 +5,7 @@ import cors from 'cors';
 import { env } from './config/env';
 import { authMiddleware } from './middleware/auth';
 import { errorHandler } from './middleware/errorHandler';
+import { authRateLimiter } from './middleware/rateLimit';
 import authRoutes from './routes/auth';
 import uploadRoutes from './routes/upload';
 import previewRoutes from './routes/preview';
@@ -26,7 +27,7 @@ const start = async (): Promise<void> => {
   app.use(cors({ origin: env.FRONTEND_URL }));
   app.use(express.json({ limit: '10mb' }));
 
-  app.use('/api/auth', authRoutes);
+  app.use('/api/auth', authRateLimiter, authRoutes);
   app.use('/api', authMiddleware);
   app.use('/api/upload', uploadRoutes);
   app.use('/api/preview', previewRoutes);

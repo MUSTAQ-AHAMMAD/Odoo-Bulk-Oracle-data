@@ -8,7 +8,14 @@ export interface ToastItem {
   type: ToastType;
 }
 
-export const useToast = () => {
+export interface UseToastResult {
+  toasts: ToastItem[];
+  success: (message: string) => void;
+  error: (message: string) => void;
+  info: (message: string) => void;
+}
+
+export const useToast = (): UseToastResult => {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const push = (message: string, type: ToastType): void => {
