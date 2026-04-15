@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fusion Integration Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Oracle Fusion Financial Integration</p>
+      <h1>Fusion Integration Dashboard</h1>
+      <p class="lede">Step-by-step wizard to validate Odoo exports, generate AR invoices, receipts, and verification packs with critical fixes applied.</p>
+    </div>
+    <div class="badge">Live</div>
+  </header>
+
+  <main>
+    <section class="wizard-nav">
+      <div class="progress">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <div class="steps" id="stepLabels">
+        <span class="step active">1. Dates</span>
+        <span class="step">2. Files</span>
+        <span class="step">3. Sequences</span>
+        <span class="step">4. Charges</span>
+        <span class="step">5. Processing</span>
+        <span class="step">6. Results</span>
+        <span class="step">7. Downloads</span>
+      </div>
+    </section>
+
+    <section class="card-grid">
+      <article class="card step-panel active" data-step="1">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 1</p>
+            <h2>Date Selection</h2>
+          </div>
+        </div>
+        <div class="card-body grid two">
+          <label class="field">
+            <span>Transaction Date</span>
+            <input type="date" id="transactionDate">
+          </label>
+          <label class="field">
+            <span>Accounting Date</span>
+            <input type="date" id="accountingDate">
+          </label>
+        </div>
+        <div class="card-footer">
+          <button class="btn primary next">Next</button>
+        </div>
+      </article>
+
+      <article class="card step-panel" data-step="2">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 2</p>
+            <h2>File Uploads</h2>
+          </div>
+          <p class="hint">All four files are required. Validation runs immediately.</p>
+        </div>
+        <div class="card-body grid two">
+          <div class="upload">
+            <label for="lineItems">Line Items Excel</label>
+            <input type="file" id="lineItems" accept=".xlsx,.xls">
+            <p class="helper">Columns: Order Ref, Subtotal w/o Tax, Barcode, Product Name, Quantity, Order Date, Register Name</p>
+            <div class="status" id="lineItemsStatus"></div>
+          </div>
+          <div class="upload">
+            <label for="payments">Payments Excel</label>
+            <input type="file" id="payments" accept=".xlsx,.xls">
+            <p class="helper">Columns: Order Ref, Branch, Payment Method, Amount</p>
+            <div class="status" id="paymentsStatus"></div>
+          </div>
+          <div class="upload">
+            <label for="metadata">FUSION_SALES_METADATA CSV</label>
+            <input type="file" id="metadata" accept=".csv">
+            <p class="helper">Columns: SUBINVENTORY, CUSTOMER_TYPE, BILL_TO_ACCOUNT, SITE_NUMBER, BILL_TO_NAME, BUSINESS_UNIT, REGION, COST_CENTER_CODE</p>
+            <div class="status" id="metadataStatus"></div>
+          </div>
+          <div class="upload">
+            <label for="registers">VENDHQ_REGISTERS CSV</label>
+            <input type="file" id="registers" accept=".csv">
+            <p class="helper">Must contain a column with REGISTER_NAME</p>
+            <div class="status" id="registersStatus"></div>
+          </div>
+        </div>
+        <div class="card-footer">
+          <button class="btn ghost prev">Back</button>
+          <button class="btn primary next" id="toStep3" disabled>Next</button>
+        </div>
+      </article>
+
+      <article class="card step-panel" data-step="3">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 3</p>
+            <h2>Sequence Configuration</h2>
+          </div>
+          <p class="hint">Separate counters for NORMAL (7 digits) and BNPL (4 digits). Legacy segments increment per AR line.</p>
+        </div>
+        <div class="card-body grid three">
+          <label class="field">
+            <span>Start Transaction Sequence</span>
+            <input type="number" id="startSequence" min="1" value="1">
+          </label>
+          <label class="field">
+            <span>Start Legacy Segment 1</span>
+            <input type="number" id="legacy1" min="1" value="1">
+          </label>
+          <label class="field">
+            <span>Start Legacy Segment 2</span>
+            <input type="number" id="legacy2" min="1" value="1">
+          </label>
+        </div>
+        <div class="card-footer">
+          <button class="btn ghost prev">Back</button>
+          <button class="btn primary next">Next</button>
+        </div>
+      </article>
+
+      <article class="card step-panel" data-step="4">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 4</p>
+            <h2>Payment Method Charges</h2>
+          </div>
+          <div class="actions">
+            <button class="btn ghost" id="loadDefaults">Load Defaults</button>
+            <button class="btn primary" id="saveConfig">Save Configuration</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <label class="field short">
+            <span>Tax Rate (%)</span>
+            <input type="number" id="taxRate" step="0.1" value="5.0">
+          </label>
+          <div class="table-wrap">
+            <table id="chargesTable">
+              <thead>
+                <tr>
+                  <th>Payment Method</th>
+                  <th>Bank Charge %</th>
+                  <th>Cap Amount (SAR)</th>
+                  <th>Apply Cap?</th>
+                  <th>Generate Miss Receipt?</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card-footer">
+          <button class="btn ghost prev">Back</button>
+          <button class="btn primary next">Next</button>
+        </div>
+      </article>
+
+      <article class="card step-panel" data-step="5">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 5</p>
+            <h2>Processing with Critical Fixes</h2>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="hint">Forward fill payments, BNPL-aware sequences, cap logic, rounding passthrough, and verification checks are enforced.</p>
+          <button class="btn primary" id="startProcessing">Start Processing</button>
+          <div class="progress large">
+            <div class="progress-bar" id="processingBar"></div>
+          </div>
+          <div class="status-line" id="processingStatus">Idle</div>
+        </div>
+        <div class="card-footer">
+          <button class="btn ghost prev">Back</button>
+          <button class="btn primary next" id="toResults" disabled>Next</button>
+        </div>
+      </article>
+
+      <article class="card step-panel" data-step="6">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 6</p>
+            <h2>Results Dashboard</h2>
+          </div>
+          <div id="verificationBadge" class="pill muted">Waiting</div>
+        </div>
+        <div class="card-body">
+          <div class="summary-grid" id="summaryCards"></div>
+          <div class="table-wrap">
+            <h3>Standard Receipts</h3>
+            <table id="standardTable">
+              <thead>
+                <tr><th>Method</th><th>Amount (SAR)</th><th># Files</th><th># Transactions</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="table-wrap">
+            <h3>Miss Receipts (Bank Charges)</h3>
+            <table id="missTable">
+              <thead>
+                <tr><th>Method</th><th>Bank %</th><th>Amount (SAR)</th><th>Cap Applied?</th><th>Example</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="table-wrap">
+            <h3>Cash Rounding</h3>
+            <table id="roundingTable">
+              <thead>
+                <tr><th>Store</th><th>Date</th><th>Rounding Amount</th><th>Miss Receipt Amount</th><th>Calculation</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card-footer">
+          <button class="btn ghost prev">Back</button>
+          <button class="btn primary next">Next</button>
+        </div>
+      </article>
+
+      <article class="card step-panel" data-step="7">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Step 7</p>
+            <h2>Downloads</h2>
+          </div>
+          <p class="hint">All CSVs use UTF-8 BOM with quoted fields.</p>
+        </div>
+        <div class="card-body downloads" id="downloadButtons">
+          <button class="btn" id="downloadAR" disabled>Download AR Invoices</button>
+          <button class="btn" id="downloadStandard" disabled>Download Standard Receipts (ZIP)</button>
+          <button class="btn" id="downloadMiss" disabled>Download Miss Receipts (ZIP)</button>
+          <button class="btn" id="downloadAll" disabled>Download All Outputs (ZIP)</button>
+          <button class="btn" id="downloadReport" disabled>Download Verification Report</button>
+        </div>
+        <div class="card-footer">
+          <button class="btn ghost prev">Back</button>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
