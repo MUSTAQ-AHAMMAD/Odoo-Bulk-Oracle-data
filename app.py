@@ -1,12 +1,14 @@
 import csv
 import json
 import os
+import importlib.util
 import threading
 import uuid
+import zipfile
 from datetime import datetime, date
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -525,6 +527,215 @@ def validate_upload(file_storage, file_type: str) -> Tuple[bool, List[str]]:
     return valid, missing
 
 
+fusion_module: Optional[Any] = None
+
+
+def load_template_module():
+    global fusion_module
+    if fusion_module is not None:
+        return fusion_module
+    template_path = Path(__file__).with_name("Odoo-export-FBDA-template.py")
+    spec = importlib.util.spec_from_file_location("fusion_template", template_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Unable to load template module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fusion_module = module
+    return module
+
+
+def build_bank_charges_csv(config: List[Dict[str, Any]], tax_rate_pct: float, target_dir: Path) -> Optional[Path]:
+    rows: List[Dict[str, Any]] = []
+    for row in config or []:
+        if not to_bool(row.get("generate_miss", True)):
+            continue
+        method = str(row.get("method", "")).strip()
+        if not method:
+            continue
+        charge_rate = float(row.get("bank_charge_pct", 0) or 0) / 100.0
+        cap_amount = float(row.get("cap", 0) or 0)
+        if not to_bool(row.get("apply_cap", False)):
+            cap_amount = 0.0
+        rows.append(
+            {
+                "PAYMENT_METHOD": method,
+                "CHARGE_RATE": charge_rate,
+                "TAX_RATE": float(tax_rate_pct) / 100.0,
+                "CAP_AMOUNT": cap_amount,
+                "RECEIPT_METHOD_ID": "",
+                "BANK_ACCOUNT_NUM": "",
+                "ORG_ID": "",
+                "ACTIVITY_NAME": "Bank Charges",
+                "CASH_ROUNDING": "Y" if "ROUNDING" in method.upper() else "N",
+            }
+        )
+    if not rows:
+        return None
+    ensure_dir(target_dir)
+    path = Path(target_dir) / "BANK_CHARGES.csv"
+    fieldnames = [
+        "PAYMENT_METHOD",
+        "CHARGE_RATE",
+        "TAX_RATE",
+        "CAP_AMOUNT",
+        "RECEIPT_METHOD_ID",
+        "BANK_ACCOUNT_NUM",
+        "ORG_ID",
+        "ACTIVITY_NAME",
+        "CASH_ROUNDING",
+    ]
+    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def create_zip(zip_path: Path, files: List[Path]) -> None:
+    ensure_dir(zip_path.parent)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in files:
+            zf.write(file, arcname=Path(file).name)
+
+
+def method_from_receipt_filename(fname: str) -> str:
+    parts = Path(fname).stem.split("_")
+    return parts[1] if len(parts) > 1 else ""
+
+
+def compact_to_iso(date_compact: str) -> str:
+    if len(date_compact) == 8 and date_compact.isdigit():
+        return f"{date_compact[:4]}-{date_compact[4:6]}-{date_compact[6:]}"
+    return date_compact
+
+
+def format_misc_example(detail: Dict[str, Any]) -> str:
+    receipt_amount = float(detail.get("receipt_amount", 0.0))
+    rate = float(detail.get("charge_rate", 0.0))
+    tax = float(detail.get("tax_rate", 0.0))
+    cap = float(detail.get("cap_amount", 0.0))
+    misc_amount = float(detail.get("misc_amount", 0.0))
+    if detail.get("cash_rounding"):
+        return f"Rounding {receipt_amount:.3f} → {misc_amount:.3f}"
+    base = f"{receipt_amount:.2f} × {rate:.4f} × (1+{tax:.4f}) = {abs(misc_amount):.4f}"
+    if cap:
+        base += f" cap {cap:.2f}"
+    return base
+
+
+def build_summary(integration: Any) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+    ar_df = getattr(integration, "last_ar_df", None) or pd.DataFrame()
+    total_ar_amount = float(ar_df["Transaction Line Amount"].sum()) if not ar_df.empty else 0.0
+    total_sales_amount = float(sum(getattr(integration, "invoice_ar_total", {}).values()))
+    total_standard = sum(float(df["Receipt Amount"].sum()) for df in getattr(integration, "last_receipt_files", {}).values())
+    total_miss_raw = sum(float(df["Amount"].sum()) for df in getattr(integration, "last_misc_files", {}).values())
+
+    net_settlement = total_standard + total_miss_raw
+    verification_passed = abs(total_ar_amount - (total_standard + abs(total_miss_raw))) <= 0.01
+
+    standard_breakdown: Dict[str, Dict[str, Any]] = {}
+    for detail in getattr(integration, "last_receipt_details", []):
+        method = detail.get("method", "")
+        entry = standard_breakdown.setdefault(method, {"amount": 0.0, "files": 0, "transactions": 0})
+        entry["amount"] += float(detail.get("net_amount", 0.0))
+        entry["files"] += 1
+        entry["transactions"] += int(detail.get("row_count", 0))
+    if not standard_breakdown:
+        for fname, df in getattr(integration, "last_receipt_files", {}).items():
+            method = method_from_receipt_filename(fname)
+            entry = standard_breakdown.setdefault(method, {"amount": 0.0, "files": 0, "transactions": 0})
+            entry["amount"] += float(df["Receipt Amount"].sum())
+            entry["files"] += 1
+            entry["transactions"] += len(df)
+
+    miss_breakdown: Dict[str, Dict[str, Any]] = {}
+    rounding_breakdown: List[Dict[str, Any]] = []
+    for detail in getattr(integration, "last_misc_details", []):
+        method = detail.get("method", "")
+        entry = miss_breakdown.setdefault(method, {"amount": 0.0, "cap_count": 0, "example": ""})
+        entry["amount"] += float(detail.get("misc_amount", 0.0))
+        if detail.get("cap_applied"):
+            entry["cap_count"] += 1
+        if not entry["example"]:
+            entry["example"] = format_misc_example(detail)
+        if detail.get("cash_rounding"):
+            rounding_breakdown.append(
+                {
+                    "store": detail.get("store", ""),
+                    "date": compact_to_iso(str(detail.get("date", ""))),
+                    "rounding_amount": float(detail.get("receipt_amount", 0.0)),
+                    "miss_amount": float(detail.get("misc_amount", 0.0)),
+                }
+            )
+
+    summary = {
+        "total_sales_amount": round(total_sales_amount, 3),
+        "total_ar_amount": round(total_ar_amount, 3),
+        "total_standard_receipts": round(total_standard, 3),
+        "total_miss_receipts": round(abs(total_miss_raw), 3),
+        "net_settlement": round(net_settlement, 3),
+        "verification_passed": verification_passed,
+        "caps": [],
+        "rounding": [fmt for fmt in (d.get("store") for d in rounding_breakdown) if fmt],
+    }
+    return summary, standard_breakdown, miss_breakdown, rounding_breakdown
+
+
+def build_result_payload(integration: Any, output_dir: Path, job_dir: Path) -> Dict[str, Any]:
+    summary, standard_breakdown, miss_breakdown, rounding_breakdown = build_summary(integration)
+
+    ar_path = getattr(integration, "last_ar_path", None)
+    if ar_path is None:
+        ar_candidates = list((output_dir / "AR_Invoices").glob("*.csv"))
+        ar_path = ar_candidates[0] if ar_candidates else None
+
+    verification_path = getattr(integration, "last_log_path", None)
+    if verification_path is None:
+        ver_candidates = list(output_dir.glob("Verification_Report_*.txt"))
+        verification_path = ver_candidates[0] if ver_candidates else None
+
+    standard_paths = getattr(integration, "last_standard_paths", []) or list((output_dir / "Receipts").rglob("*.csv"))
+    misc_paths = getattr(integration, "last_misc_paths", []) or list((output_dir / "MiscReceipts").rglob("*.csv"))
+
+    standard_zip = job_dir / "standard_receipts.zip"
+    miss_zip = job_dir / "misc_receipts.zip"
+    all_zip = job_dir / "all_outputs.zip"
+
+    create_zip(standard_zip, standard_paths)
+    create_zip(miss_zip, misc_paths)
+
+    all_files: List[Path] = []
+    for candidate in [ar_path, verification_path]:
+        if candidate:
+            all_files.append(Path(candidate))
+    all_files.extend(standard_paths)
+    all_files.extend(misc_paths)
+    unique_files = list(dict.fromkeys(all_files))
+    create_zip(all_zip, unique_files)
+
+    return {
+        "ar_path": str(ar_path) if ar_path else "",
+        "verification_report": str(verification_path) if verification_path else "",
+        "standard_zip": str(standard_zip),
+        "miss_zip": str(miss_zip),
+        "all_zip": str(all_zip),
+        "summary": summary,
+        "standard_breakdown": standard_breakdown,
+        "miss_breakdown": miss_breakdown,
+        "rounding_breakdown": rounding_breakdown,
+        "progress_steps": [
+            "Preparing files...",
+            "Loading input data...",
+            "Generating AR invoices...",
+            "Aggregating receipts...",
+            "Calculating misc receipts...",
+            "Running verification...",
+            "Saving files...",
+            "Complete",
+        ],
+    }
+
+
 def parse_date(value: str) -> datetime:
     try:
         return datetime.strptime(value, "%Y-%m-%d")
@@ -724,497 +935,66 @@ def download_verification(job_id: str):
 
 def process_job(job_id: str, payload: Dict[str, Any]) -> None:
     try:
-        update_job(job_id, status="running", progress=5, message="Forward filling payments...")
+        update_job(job_id, status="running", progress=5, message="Preparing files...")
 
-        txn_date = parse_date(payload["transaction_date"])
-        acct_date = parse_date(payload["accounting_date"])
-        txn_date_str = txn_date.strftime("%Y-%m-%d 00:00:00")
-        acct_date_str = acct_date.strftime("%Y-%m-%d 00:00:00")
+        module = load_template_module()
+        output_dir = Path(payload["job_dir"]) / "ORACLE_FUSION_OUTPUT"
+        ensure_dir(output_dir)
+
+        bank_charges_path = build_bank_charges_csv(
+            payload.get("charges", []),
+            payload.get("tax_rate", 5.0),
+            output_dir,
+        )
+
+        update_job(job_id, progress=15, message="Loading input data...")
+
+        integration = module.OracleFusionIntegration(
+            output_dir=str(output_dir),
+            start_seq=payload.get("start_sequence", 1),
+            start_legacy_seq_1=payload.get("legacy1", 1),
+            start_legacy_seq_2=payload.get("legacy2", 1),
+        )
 
         paths = payload["paths"]
-        line_items_df = read_table(open(paths["line_items"], "rb"), "line_items")
-        payments_df = read_table(open(paths["payments"], "rb"), "payments")
-        metadata_df = read_table(open(paths["metadata"], "rb"), "metadata")
-        registers_df = read_table(open(paths["registers"], "rb"), "registers")
+        integration.load_data(
+            str(paths["line_items"]),
+            str(paths["payments"]),
+            str(paths["metadata"]),
+            str(paths["registers"]),
+            str(bank_charges_path) if bank_charges_path else None,
+        )
 
-        # Step 1: forward fill critical columns
-        payments_df["Order Ref"] = payments_df["Order Ref"].ffill()
-        payments_df["Branch"] = payments_df["Branch"].ffill()
+        update_job(job_id, progress=35, message="Generating AR invoices...")
+        ar_df = integration.generate_ar_invoices()
+        integration.save_ar(ar_df)
 
-        warnings_log: List[str] = []
-        caps_log: List[str] = []
-        rounding_log: List[str] = []
+        update_job(job_id, progress=55, message="Aggregating receipts...")
+        receipt_files = integration.generate_receipts()
+        integration.save_receipts(receipt_files)
 
-        update_job(job_id, progress=12, message="Building invoice index...")
+        update_job(job_id, progress=70, message="Calculating misc receipts...")
+        misc_files = integration.generate_misc_receipts(receipt_files)
+        integration.save_misc_receipts(misc_files)
 
-        # Build mapping for orders to store and date
-        order_store_map: Dict[str, str] = {}
-        order_date_map: Dict[str, datetime] = {}
+        update_job(job_id, progress=82, message="Running verification...")
+        integration._write_final_crosscheck(ar_df, receipt_files, misc_files)
+        integration.vlog.close()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = output_dir / f"Verification_Report_{ts}.txt"
+        integration.vlog.write(log_path)
+        integration.last_log_path = log_path
+        integration.vlog.print_summary()
 
-        for _, row in line_items_df.iterrows():
-            order_ref = str(row.get("Order Lines/Order Ref", "")).strip()
-            if not order_ref:
-                continue
-            store_name = str(row.get("Order Lines/Register Name", "")).strip()
-            date_val = row.get("Order Lines/Order Ref/Date")
-            parsed_date = pd.to_datetime(date_val, errors="coerce")
-            if pd.isna(parsed_date):
-                parsed_date = txn_date
-            order_store_map[order_ref] = store_name
-            order_date_map[order_ref] = parsed_date
-
-        register_col = next((c for c in registers_df.columns if "REGISTER_NAME" in str(c).upper()), None)
-        register_lookup = {}
-        if register_col:
-            for _, row in registers_df.iterrows():
-                register_lookup[str(row.get(register_col, "")).strip()] = row.to_dict()
-
-        metadata_lookup = {}
-        for _, row in metadata_df.iterrows():
-            metadata_lookup[str(row.get("SUBINVENTORY", "")).strip()] = row.to_dict()
-
-        update_job(job_id, progress=18, message="Determining customer types...")
-
-        customer_type_map: Dict[str, str] = {}
-        payments_df["method_norm"] = payments_df["Payments/Payment Method"].apply(normalize_method)
-        for order_ref, group in payments_df.groupby("Order Ref"):
-            methods = set(group["method_norm"])
-            if any(m == "TAMARA" for m in methods):
-                customer_type_map[str(order_ref)] = "TAMARA"
-            elif any(m == "TABBY" for m in methods):
-                customer_type_map[str(order_ref)] = "TABBY"
-            else:
-                customer_type_map[str(order_ref)] = "NORMAL"
-
-        update_job(job_id, progress=26, message="Generating AR invoices...")
-
-        transaction_map: Dict[str, str] = {}
-        normal_counter = payload["start_sequence"]
-        tabby_counter = payload["start_sequence"]
-        tamara_counter = payload["start_sequence"]
-        segment1 = payload["legacy1"]
-        segment2 = payload["legacy2"]
-
-        ar_records: List[Dict[str, Any]] = []
-        total_sales_amount = 0.0
-
-        for _, row in line_items_df.iterrows():
-            order_ref = str(row.get("Order Lines/Order Ref", "")).strip()
-            if not order_ref:
-                warnings_log.append("Skipped line item with blank Order Ref.")
-                continue
-
-            store_name = order_store_map.get(order_ref)
-            order_dt = order_date_map.get(order_ref, txn_date)
-            if store_name is None or order_dt is None:
-                warnings_log.append(f"Skipped line item {order_ref} due to missing store/date.")
-                continue
-
-            customer_type = customer_type_map.get(order_ref, "NORMAL")
-            if order_ref not in transaction_map:
-                if customer_type == "TABBY":
-                    if tabby_counter > 9999:
-                        raise ValueError("TABBY sequence overflow (max 9999)")
-                    transaction_map[order_ref] = format_transaction_number(tabby_counter, customer_type)
-                    tabby_counter += 1
-                elif customer_type == "TAMARA":
-                    if tamara_counter > 9999:
-                        raise ValueError("TAMARA sequence overflow (max 9999)")
-                    transaction_map[order_ref] = format_transaction_number(tamara_counter, customer_type)
-                    tamara_counter += 1
-                else:
-                    if normal_counter > 9_999_999:
-                        raise ValueError("NORMAL sequence overflow (max 9999999)")
-                    transaction_map[order_ref] = format_transaction_number(normal_counter, customer_type)
-                    normal_counter += 1
-
-            amount = float(row.get("Order Lines/Subtotal w/o Tax", 0) or 0)
-            qty = float(row.get("Order Lines/Quantity", 0) or 0)
-            product_name = str(row.get("Order Lines/Product/Name", ""))
-            barcode = str(row.get("Order Lines/Product/Barcode", ""))
-
-            discount_flag = is_discount(product_name)
-            inventory_item = "" if discount_flag else barcode
-            memo_line = "Discount Item" if discount_flag else ""
-            line_desc = "Discount Item" if discount_flag else product_name[:240]
-
-            unit_price = compute_unit_price(amount, qty)
-
-            record = {col: "" for col in AR_COLUMNS}
-            record["Transaction Batch Source Name"] = AR_STATIC["Transaction Batch Source Name"]
-            record["Transaction Type Name"] = AR_STATIC["Transaction Type Name"]
-            record["Payment Terms"] = AR_STATIC["Payment Terms"]
-            record["Transaction Date"] = txn_date_str
-            record["Accounting Date"] = acct_date_str
-            record["Transaction Number"] = transaction_map[order_ref]
-            record["Transaction Line Type"] = AR_STATIC["Transaction Line Type"]
-            record["Transaction Line Description"] = line_desc
-            record["Currency Code"] = AR_STATIC["Currency Code"]
-            record["Currency Conversion Type"] = AR_STATIC["Currency Conversion Type"]
-            record["Currency Conversion Date"] = acct_date.strftime("%Y-%m-%d")
-            record["Currency Conversion Rate"] = AR_STATIC["Currency Conversion Rate"]
-            record["Transaction Line Amount"] = round(amount, 2)
-            record["Transaction Line Quantity"] = qty
-            record["Unit Selling Price"] = round(unit_price, 4)
-            record["Line Transactions Flexfield Context"] = AR_STATIC["Line Transactions Flexfield Context"]
-            record["Line Transactions Flexfield Segment 1"] = f"LEGACY{segment1:08d}"
-            record["Line Transactions Flexfield Segment 2"] = f"LEGACY{segment2:08d}"
-            record["Tax Classification Code"] = "OUTPUT-GOODS-DOM-15%"
-            record["Sales Order Number"] = order_ref
-            record["Unit of Measure Code"] = AR_STATIC["Unit of Measure Code"]
-            record["Default Taxation Country"] = AR_STATIC["Default Taxation Country"]
-            record["Inventory Item Number"] = inventory_item
-            record["Comments"] = AR_STATIC["Comments"]
-            record["END"] = AR_STATIC["END"]
-            if memo_line:
-                record["Memo Line Name"] = memo_line
-
-            # Metadata mapping
-            meta_row = metadata_lookup.get(store_name, {})
-            if store_name not in metadata_lookup:
-                warnings_log.append(f"Metadata lookup missing for store {store_name}; leaving customer fields blank.")
-            record["Bill-to Customer Account Number"] = meta_row.get("BILL_TO_ACCOUNT", "")
-            record["Bill-to Customer Site Number"] = meta_row.get("SITE_NUMBER", "")
-
-            ar_records.append(record)
-            total_sales_amount += amount
-            segment1 += 1
-            segment2 += 1
-
-        ar_df = pd.DataFrame(ar_records, columns=AR_COLUMNS)
-
-        update_job(job_id, progress=40, message="Calculating total sales...")
-
-        total_ar_amount = float(ar_df["Transaction Line Amount"].sum()) if not ar_df.empty else 0.0
-
-        # Step 6: Standard receipts aggregation
-        update_job(job_id, progress=50, message="Generating standard receipts...")
-
-        standard_groups: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-        for _, row in payments_df.iterrows():
-            order_ref = str(row.get("Order Ref", "")).strip()
-            method = normalize_method(row.get("Payments/Payment Method", ""))
-            if method not in STANDARD_RECEIPT_METHODS:
-                continue
-            store_name = order_store_map.get(order_ref)
-            sale_dt = order_date_map.get(order_ref, txn_date)
-            if not store_name or sale_dt is None:
-                warnings_log.append(f"Payment for Order Ref {order_ref} skipped (no matching store/date).")
-                continue
-            amount = float(row.get("Payments/Amount", 0) or 0)
-            key = aggregate_method_key(store_name, sale_dt, method)
-            group = standard_groups.setdefault(
-                key,
-                {
-                    "amount": 0.0,
-                    "transactions": 0,
-                    "customer": metadata_lookup.get(store_name, {}),
-                },
-            )
-            group["amount"] += amount
-            group["transactions"] += 1
-
-        standard_receipt_files: Dict[str, pd.DataFrame] = {}
-        standard_breakdown: Dict[str, Dict[str, Any]] = {}
-        seq_global = 1
-        standard_folder = Path(payload["job_dir"]) / "Receipts" / "Standard"
-        ensure_dir(standard_folder)
-
-        for (store, date_str, method), data in standard_groups.items():
-            records = []
-            seq_local = 1
-            safe_store = make_safe_name(store or "STORE")
-            filename = f"Receipt_{method}_{safe_store}_{date_str}.csv"
-            receipt_number_base = f"{method}-{safe_store}-{date_str}"
-            meta_row = data.get("customer", {})
-            if not meta_row:
-                warnings_log.append(f"Metadata missing for standard receipt store {store}; using blanks.")
-            business_unit = meta_row.get("BUSINESS_UNIT", "")
-            customer_name = meta_row.get("BILL_TO_NAME", store)
-            customer_account = meta_row.get("BILL_TO_ACCOUNT", "")
-            customer_site = meta_row.get("SITE_NUMBER", "")
-            for _ in range(1):
-                record = {
-                    "Business Unit": business_unit,
-                    "Batch Source": "Spreadsheet",
-                    "Batch Name": f"Receipt_{method}_{safe_store}_{date_str}",
-                    "Receipt Method": method,
-                    "Remittance Bank": method,
-                    "Remittance Bank Account": f"{method} Account",
-                    "Batch Date": f"{date_str} 00:00:00",
-                    "Accounting Date": f"{date_str} 00:00:00",
-                    "Deposit Date": f"{date_str} 00:00:00",
-                    "Currency": "SAR",
-                    "Sequence Number": f"{seq_local:04d}",
-                    "Receipt Number": f"{receipt_number_base}-{seq_global:04d}",
-                    "Receipt Amount": round(data["amount"], 2),
-                    "Receipt Date": f"{date_str} 00:00:00",
-                    "Accounting Date (Receipt)": f"{date_str} 00:00:00",
-                    "Currency (Receipt)": "SAR",
-                    "Document Number": "",
-                    "Customer Name": customer_name,
-                    "Customer Account Number": customer_account,
-                    "Customer Site Number": customer_site,
-                    "Misc Charge Type": "",
-                    "Original Payment Method": method,
-                    "Calculation Details": "",
-                }
-                records.append(record)
-                seq_local += 1
-                seq_global += 1
-            df = pd.DataFrame(records, columns=RECEIPT_COLUMNS)
-            path = standard_folder / filename
-            save_csv(df, path)
-            standard_receipt_files[str(path)] = df
-            breakdown = standard_breakdown.setdefault(method, {"amount": 0.0, "files": 0, "transactions": 0})
-            breakdown["amount"] += data["amount"]
-            breakdown["files"] += 1
-            breakdown["transactions"] += data["transactions"]
-
-        # Step 7: Miss receipts for bank charges
-        update_job(job_id, progress=62, message="Calculating bank charges...")
-
-        method_config = {m["method"].upper(): m for m in payload["charges"]}
-        miss_bank_records: Dict[str, pd.DataFrame] = {}
-        miss_folder = Path(payload["job_dir"]) / "Receipts" / "Miss" / "Bank_Charges"
-        ensure_dir(miss_folder)
-
-        miss_breakdown: Dict[str, Dict[str, Any]] = {}
-
-        grouped_payments = payments_df.copy()
-        grouped_payments["store"] = grouped_payments["Order Ref"].map(order_store_map)
-        grouped_payments["sale_date"] = grouped_payments["Order Ref"].map(order_date_map)
-
-        for (store, sale_dt, method), group in grouped_payments.groupby(["store", "sale_date", "method_norm"]):
-            if not store or pd.isna(sale_dt):
-                warnings_log.append("Payment missing store/date for bank charge; skipped.")
-                continue
-            config = method_config.get(method)
-            if not config or not to_bool(config.get("generate_miss")):
-                continue
-
-            amount = float(group["Payments/Amount"].sum())
-            bank_pct = float(config.get("bank_charge_pct", 0.0))
-            cap_amount = float(config.get("cap", 0.0)) if to_bool(config.get("apply_cap")) else None
-            bank_rate = bank_pct / 100.0
-            tax_rate = payload["tax_rate"] / 100.0
-            temp1 = amount * bank_rate
-            temp2 = 1 + tax_rate
-            misc_charges = temp1 * temp2
-            cap_applied = False
-            if cap_amount is not None and misc_charges > cap_amount:
-                misc_charges = cap_amount
-                cap_applied = True
-                caps_log.append(
-                    f"Cap applied for {method} {store} {sale_dt.date()}: capped to {cap_amount:.2f}"
-                )
-            misc_receipt_amount = 0 - misc_charges
-
-            date_str = pd.to_datetime(sale_dt).strftime("%Y-%m-%d")
-            safe_store = make_safe_name(store)
-            filename = f"MISS_RCPT_{method}_{safe_store}_{date_str}.csv"
-            meta_row = metadata_lookup.get(store, {})
-            if store not in metadata_lookup:
-                warnings_log.append(f"Metadata missing for bank charge store {store}; using blanks.")
-            record = {
-                "Business Unit": meta_row.get("BUSINESS_UNIT", ""),
-                "Batch Source": "Spreadsheet",
-                "Batch Name": f"MISS_RCPT_{method}_{safe_store}_{date_str}",
-                "Receipt Method": method,
-                "Remittance Bank": method,
-                "Remittance Bank Account": f"{method} Account",
-                "Batch Date": f"{date_str} 00:00:00",
-                "Accounting Date": f"{date_str} 00:00:00",
-                "Deposit Date": f"{date_str} 00:00:00",
-                "Currency": "SAR",
-                "Sequence Number": "0001",
-                "Receipt Number": f"MISC-{method}-{safe_store}-{date_str}-001",
-                "Receipt Amount": round(misc_receipt_amount, 3),
-                "Receipt Date": f"{date_str} 00:00:00",
-                "Accounting Date (Receipt)": f"{date_str} 00:00:00",
-                "Currency (Receipt)": "SAR",
-                "Document Number": "",
-                "Customer Name": meta_row.get("BILL_TO_NAME", store),
-                "Customer Account Number": meta_row.get("BILL_TO_ACCOUNT", ""),
-                "Customer Site Number": meta_row.get("SITE_NUMBER", ""),
-                "Misc Charge Type": "Bank Charge",
-                "Original Payment Method": method,
-                "Calculation Details": f"{amount:.2f} × {bank_rate:.3f} = {temp1:.3f} × {temp2:.3f} = {temp1 * temp2:.3f} → {misc_receipt_amount:.3f}",
-            }
-
-            df = pd.DataFrame([record], columns=RECEIPT_COLUMNS)
-            path = miss_folder / filename
-            save_csv(df, path)
-            miss_bank_records[str(path)] = df
-
-            br = miss_breakdown.setdefault(method, {"amount": 0.0, "cap_count": 0, "example": record["Calculation Details"]})
-            br["amount"] += misc_receipt_amount
-            if cap_applied:
-                br["cap_count"] += 1
-
-        # Step 8: Cash rounding miss receipts
-        update_job(job_id, progress=74, message="Generating cash rounding receipts...")
-
-        miss_rounding_records: Dict[str, pd.DataFrame] = {}
-        rounding_folder = Path(payload["job_dir"]) / "Receipts" / "Miss" / "Cash_Rounding"
-        ensure_dir(rounding_folder)
-
-        rounding_groups: Dict[Tuple[str, str], float] = {}
-        for _, row in payments_df.iterrows():
-            method_norm = normalize_method(row.get("Payments/Payment Method", ""))
-            if not any(key in method_norm for key in ROUNDING_KEYWORDS):
-                continue
-            order_ref = str(row.get("Order Ref", "")).strip()
-            store_name = order_store_map.get(order_ref)
-            sale_dt = order_date_map.get(order_ref, txn_date)
-            if not store_name or sale_dt is None:
-                warnings_log.append("Rounding payment missing store/date; skipped.")
-                continue
-            amount = float(row.get("Payments/Amount", 0) or 0)
-            key = (store_name, pd.to_datetime(sale_dt).strftime("%Y-%m-%d"))
-            rounding_groups[key] = rounding_groups.get(key, 0.0) + amount
-
-        for (store, date_str), amt in rounding_groups.items():
-            misc_charges = amt
-            misc_receipt_amount = 0 - misc_charges
-            safe_store = make_safe_name(store)
-            filename = f"MISS_RCPT_CashRounding_{safe_store}_{date_str}.csv"
-            meta_row = metadata_lookup.get(store, {})
-            if store not in metadata_lookup:
-                warnings_log.append(f"Metadata missing for rounding store {store}; using blanks.")
-            record = {
-                "Business Unit": meta_row.get("BUSINESS_UNIT", ""),
-                "Batch Source": "Spreadsheet",
-                "Batch Name": f"MISS_RCPT_CASH_{safe_store}_{date_str}",
-                "Receipt Method": "Cash",
-                "Remittance Bank": "Cash",
-                "Remittance Bank Account": "Cash Account",
-                "Batch Date": f"{date_str} 00:00:00",
-                "Accounting Date": f"{date_str} 00:00:00",
-                "Deposit Date": f"{date_str} 00:00:00",
-                "Currency": "SAR",
-                "Sequence Number": "0001",
-                "Receipt Number": f"MISC-CASH-{safe_store}-{date_str}-001",
-                "Receipt Amount": round(misc_receipt_amount, 3),
-                "Receipt Date": f"{date_str} 00:00:00",
-                "Accounting Date (Receipt)": f"{date_str} 00:00:00",
-                "Currency (Receipt)": "SAR",
-                "Document Number": "",
-                "Customer Name": meta_row.get("BILL_TO_NAME", store),
-                "Customer Account Number": meta_row.get("BILL_TO_ACCOUNT", ""),
-                "Customer Site Number": meta_row.get("SITE_NUMBER", ""),
-                "Misc Charge Type": "Cash Rounding",
-                "Original Payment Method": "Cash",
-                "Calculation Details": f"Rounding amount {amt:.3f} → -{amt:.3f} = {misc_receipt_amount:.3f}",
-            }
-            rounding_log.append(record["Calculation Details"])
-            df = pd.DataFrame([record], columns=RECEIPT_COLUMNS)
-            path = rounding_folder / filename
-            save_csv(df, path)
-            miss_rounding_records[str(path)] = df
-
-        # Step 9: Verification cross-check
-        update_job(job_id, progress=84, message="Verifying totals...")
-
-        total_standard = sum(v["Receipt Amount"].sum() for v in standard_receipt_files.values()) if standard_receipt_files else 0.0
-        total_miss = 0.0
-        for df in miss_bank_records.values():
-            total_miss += df["Receipt Amount"].sum()
-        for df in miss_rounding_records.values():
-            total_miss += df["Receipt Amount"].sum()
-        net_settlement = total_standard + total_miss
-        verification_ok = abs(total_ar_amount - (total_standard + abs(total_miss))) <= 0.01
-
-        # Step 10: Save outputs and report
         update_job(job_id, progress=92, message="Saving files...")
-
-        ar_path = Path(payload["job_dir"]) / "AR_Invoices.csv"
-        save_csv(ar_df, ar_path)
-
-        verification_report = Path(payload["job_dir"]) / "verification_report.txt"
-        with open(verification_report, "w", encoding="utf-8") as handle:
-            handle.write("FUSION INTEGRATION VERIFICATION REPORT\n")
-            handle.write("=" * 60 + "\n")
-            handle.write(f"Total AR Amount: {total_ar_amount:.3f}\n")
-            handle.write(f"Total Standard Receipts: {total_standard:.3f}\n")
-            handle.write(f"Total Miss Receipts: {total_miss:.3f}\n")
-            handle.write(f"Net Settlement: {net_settlement:.3f}\n")
-            handle.write(
-                f"Check (AR == Standard + abs(Miss)): {'PASS' if verification_ok else 'FAIL'}\n\n"
-            )
-            if caps_log:
-                handle.write("Cap Applied Details:\n")
-                for line in caps_log:
-                    handle.write(f"- {line}\n")
-                handle.write("\n")
-            if rounding_log:
-                handle.write("Cash Rounding Adjustments:\n")
-                for line in rounding_log:
-                    handle.write(f"- {line}\n")
-                handle.write("\n")
-            if warnings_log:
-                handle.write("Warnings:\n")
-                for w in warnings_log:
-                    handle.write(f"- {w}\n")
-
-        # Create zip bundles
-        all_zip = Path(payload["job_dir"]) / "all_outputs.zip"
-        standard_zip = Path(payload["job_dir"]) / "standard_receipts.zip"
-        miss_zip = Path(payload["job_dir"]) / "miss_receipts.zip"
-
-        def build_zip(zip_path: Path, files: List[Path]) -> None:
-            import zipfile
-
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for file in files:
-                    zf.write(file, arcname=file.name)
-
-        build_zip(standard_zip, [Path(p) for p in standard_receipt_files.keys()])
-        miss_files = [Path(p) for p in miss_bank_records.keys()] + [Path(p) for p in miss_rounding_records.keys()]
-        build_zip(miss_zip, miss_files)
-        all_files = [ar_path, verification_report] + list(Path(payload["job_dir"]).rglob("*.csv"))
-        build_zip(all_zip, all_files)
+        result_payload = build_result_payload(integration, output_dir, Path(payload["job_dir"]))
 
         update_job(
             job_id,
             progress=100,
             status="completed",
             message="Processing complete",
-            result={
-                "ar_path": str(ar_path),
-                "verification_report": str(verification_report),
-                "standard_zip": str(standard_zip),
-                "miss_zip": str(miss_zip),
-                "all_zip": str(all_zip),
-                "summary": {
-                    "total_sales_amount": round(total_sales_amount, 3),
-                    "total_ar_amount": round(total_ar_amount, 3),
-                    "total_standard_receipts": round(total_standard, 3),
-                    "total_miss_receipts": round(abs(total_miss), 3),
-                    "net_settlement": round(net_settlement, 3),
-                    "verification_passed": verification_ok,
-                    "caps": caps_log,
-                    "rounding": rounding_log,
-                },
-                "standard_breakdown": standard_breakdown,
-                "miss_breakdown": miss_breakdown,
-                "rounding_breakdown": [
-                    {"store": store, "date": date, "rounding_amount": amt, "miss_amount": -amt}
-                    for (store, date), amt in rounding_groups.items()
-                ],
-                "progress_steps": [
-                    "Forward filling payments...",
-                    "Building invoice index...",
-                    "Generating AR invoices...",
-                    "Calculating total sales...",
-                    "Generating standard receipts...",
-                    "Calculating bank charges...",
-                    "Generating cash rounding receipts...",
-                    "Verifying totals...",
-                    "Saving files...",
-                    "Complete",
-                ],
-            },
+            result=result_payload,
         )
     except Exception as exc:  # noqa: BLE001
         update_job(job_id, status="failed", progress=100, message=str(exc))
