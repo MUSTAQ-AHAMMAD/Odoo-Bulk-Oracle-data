@@ -1042,6 +1042,16 @@ class OracleFusionIntegration:
                                                                    lambda: defaultdict(float))
         self._receipt_agg_detail: dict = {}
 
+        self.last_ar_df:           Optional[pd.DataFrame] = None
+        self.last_receipt_files:   Dict[str, pd.DataFrame] = {}
+        self.last_misc_files:      Dict[str, pd.DataFrame] = {}
+        self.last_receipt_details: List[dict] = []
+        self.last_misc_details:    List[dict] = []
+        self.last_ar_path:         Optional[Path] = None
+        self.last_standard_paths:  List[Path] = []
+        self.last_misc_paths:      List[Path] = []
+        self.last_log_path:        Optional[Path] = None
+
     # ──────────────────────────────────────────────────────────────────
     # DATA LOADING
     # ──────────────────────────────────────────────────────────────────
@@ -1488,6 +1498,7 @@ class OracleFusionIntegration:
             for line in meta_issues:
                 vl.add(line)
 
+        self.last_ar_df = df_ar
         return df_ar
 
     # ──────────────────────────────────────────────────────────────────
@@ -1592,6 +1603,8 @@ class OracleFusionIntegration:
                    f"{method_totals[m]:>14,.2f} SAR")
         vl.add(f"\n    {'Grand Total':<28}  {receipt_grand:>14,.2f} SAR")
 
+        self.last_receipt_files   = receipt_files
+        self.last_receipt_details = receipt_detail_rows
         return receipt_files
 
     # ──────────────────────────────────────────────────────────────────
@@ -1660,6 +1673,9 @@ class OracleFusionIntegration:
                 cap_amount     = cfg["cap_amount"],
                 cash_rounding  = cfg["cash_rounding"],
             )
+            cap_applied = (
+                cfg["cap_amount"] > 0 and abs(misc_amount) == cfg["cap_amount"]
+            )
 
             if misc_amount == 0:
                 skipped_zero += 1
@@ -1710,6 +1726,9 @@ class OracleFusionIntegration:
                 "misc_amount":   misc_amount,
                 "rcpt_num":      misc_rcpt_num,
                 "activity":      cfg["activity_name"],
+                "cap_applied":   cap_applied,
+                "store":         store_part,
+                "date":          date_str_compact,
             })
             seq += 1
 
@@ -1757,6 +1776,8 @@ class OracleFusionIntegration:
             vl.add(f"    {m:<14}  {mc[m]:>3} file(s)  {mt[m]:>14,.4f} SAR")
         vl.add(f"\n    {'Grand Total':<28}  {misc_grand:>14,.4f} SAR")
 
+        self.last_misc_files    = misc_files
+        self.last_misc_details  = misc_detail_rows
         return misc_files
 
     # ───────────────────────────────���──────────────────────────────────
@@ -1770,6 +1791,7 @@ class OracleFusionIntegration:
         ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
         fpath = folder / f"AR_Invoice_Import_{ts}.csv"
         df.to_csv(fpath, index=False, encoding="utf-8-sig", quoting=1)
+        self.last_ar_path = fpath
 
         vl.section("10. OUTPUT FILES — AR INVOICES")
         vl.kv("File",         str(fpath))
@@ -1803,6 +1825,7 @@ class OracleFusionIntegration:
 
         method_totals: Dict[str, float] = defaultdict(float)
         method_counts: Dict[str, int]   = defaultdict(int)
+        self.last_standard_paths: List[Path] = []
 
         for fname, df in sorted(receipt_files.items()):
             parts  = fname.replace(".csv", "").split("_")
@@ -1814,6 +1837,7 @@ class OracleFusionIntegration:
             amt = df["Receipt Amount"].sum()
             method_totals[method] += amt
             method_counts[method] += 1
+            self.last_standard_paths.append(fpath)
             vl.kv(f"  {fname}", f"{amt:,.2f} SAR")
             print(f"  ✓ {fname:<65}  {amt:,.2f} SAR")
 
@@ -1846,6 +1870,7 @@ class OracleFusionIntegration:
 
         method_totals: Dict[str, float] = defaultdict(float)
         method_counts: Dict[str, int]   = defaultdict(int)
+        self.last_misc_paths: List[Path] = []
 
         for fname, df in sorted(misc_files.items()):
             # MiscReceipt_<Method>_<Store>_<Date>.csv
@@ -1858,6 +1883,7 @@ class OracleFusionIntegration:
             amt = df["Amount"].sum()
             method_totals[method] += amt
             method_counts[method] += 1
+            self.last_misc_paths.append(fpath)
             vl.kv(f"  {fname}", f"{amt:,.4f} SAR")
             print(f"  ✓ {fname:<65}  {amt:,.4f} SAR")
 
@@ -1969,6 +1995,7 @@ class OracleFusionIntegration:
         ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = self.output_dir / f"Verification_Report_{ts}.txt"
         self.vlog.write(log_path)
+        self.last_log_path = log_path
         self.vlog.print_summary()
 
         print("\n" + "=" * 72)
