@@ -19,3 +19,7 @@ Then open http://localhost:5000 to use the wizard.
 - BNPL-aware sequence generation with overflow guards.
 - Bank-charge and cash-rounding miss receipts with cap logic and verification report.
 - Downloadable AR invoices, standard receipts, miss receipts, and full bundle (UTF-8 BOM, quoted fields).
+
+## Frontend wizard preview
+
+![Fusion Integration wizard UI](static/wizard.png)
